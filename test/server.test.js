@@ -207,3 +207,20 @@ test("Feldsperre und gemeinsamer Verlauf", async () => {
     assert.equal(http.length, 1);
   } finally { await u.ende(); }
 });
+
+test("Automatiken auf mehreren Clients: gleiches Schreiben ist kein Konflikt", async () => {
+  const u = await umgebung();
+  try {
+    const s = await (await u.req("/api/sessions", { method: "POST", body: JSON.stringify({ app: "netzwerkplaner", name: "Auto", doc: clone(demoProject()), appVersion: "0.6.0" }) })).json();
+    const h = [];
+    const A = u.client({ app: "netzwerkplaner", session: s.id, name: "A", onHinweis: (x) => h.push(x) });
+    const B = u.client({ app: "netzwerkplaner", session: s.id, name: "B", onHinweis: (x) => h.push(x) });
+    await bis(() => A.online && B.online);
+    const icon = { id: "ic1", name: "Eigenes Icon", svg: "<svg/>" };
+    for (const c of [A, B]) aendern(c, (d) => { d.icons.push(icon); d.layout.fix = { x1: { x: 1, y: 2 } }; });
+    await bis(() => !A.ausstehend && !B.ausstehend && A.seq === B.seq);
+    assert.deepEqual(A.doc, B.doc);
+    assert.equal(A.doc.icons.filter((i) => i.id === "ic1").length, 1);
+    assert.deepEqual(h, []);
+  } finally { await u.ende(); }
+});

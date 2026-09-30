@@ -13,7 +13,7 @@
 // C→S  verlauf  { vor?, limit? }  →  S→C verlauf { eintraege }   (Verlauf aller Nutzer)
 // S→C  error    { reason, detail }   danach wird die Verbindung geschlossen
 import crypto from "node:crypto";
-import { apply, diff, pathKey } from "./ops.js";
+import { apply, diff, pathKey, valueAt } from "./ops.js";
 import { appModul } from "./apps/index.js";
 
 export const PROTO = 1;
@@ -34,6 +34,16 @@ export const neueId = () => crypto.randomBytes(9).toString("base64url");
 
 // Schlüssel eines Ops für Last-Writer-Wins (ins/rem adressieren das Element selbst)
 const opKey = (o) => (o.op === "ins" ? pathKey([...o.path, { id: o.value.id }]) : o.op === "rem" ? pathKey([...o.path, { id: o.id }]) : pathKey(o.path));
+// Ändert ein Op nichts am aktuellen Stand? Automatiken (Icons nachtragen, Positionen sichern) laufen auf
+// jedem Client; schreiben zwei dasselbe, soll das weder als Konflikt noch als verworfen gemeldet werden.
+const gleich2 = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+const istNoop = (doc, o) => {
+  if (o.op === "set") return gleich2(valueAt(doc, o.path), o.value);
+  if (o.op === "ins") { const a = valueAt(doc, o.path); return Array.isArray(a) && a.some((x) => x?.id === o.value.id && gleich2(x, o.value)); }
+  if (o.op === "add") { const a = valueAt(doc, o.path); return Array.isArray(a) && a.includes(o.value); }
+  return false;
+};
+
 const vorfahren = (key) => { const t = key.split("/"); return t.map((_, i) => t.slice(0, i + 1).join("/")); };
 // Überschneiden sich zwei Pfade (gleich, oder einer liegt im anderen)?
 const ueberlappt = (a, b) => a === b || a.startsWith(b + "/") || b.startsWith(a + "/");
@@ -121,6 +131,7 @@ class Sitzung {
       angewendet = diff(this.doc, next);
     } else {
       if (!Array.isArray(ops)) return client.sendJson({ type: "reject", txId, reason: "ungueltig", detail: "ops fehlt" });
+      ops = ops.filter((o) => !istNoop(this.doc, o));
       try { skipped = apply(next, ops); }
       catch (e) { return client.sendJson({ type: "reject", txId, reason: "ungueltig", detail: e.message }); }
       angewendet = ops.filter((o) => !skipped.includes(o));
