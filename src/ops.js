@@ -110,6 +110,7 @@ const resolve = (doc, path) => {
   if (Array.isArray(cur) || !isObj(cur)) return null;
   return { parent: cur, key };
 };
+export const valueAt = (doc, path) => getAt(doc, path);
 const getAt = (doc, path) => {
   if (!path.length) return doc;
   const r = resolve(doc, path);

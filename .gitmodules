@@ -1,0 +1,4 @@
+[submodule "netzwerkplaner"]
+	path = netzwerkplaner
+	url = https://github.com/Nomisimo/Netzwerkplaner
+	branch = feature/sync-operationen
