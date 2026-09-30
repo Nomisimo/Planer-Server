@@ -57,6 +57,7 @@ export class Store {
   }
 
   anhaengen(app, id, tx) {
+    fs.mkdirSync(this.sitzungsDir(app, id), { recursive: true });
     fs.appendFileSync(path.join(this.sitzungsDir(app, id), "ops.jsonl"), JSON.stringify(tx) + "\n");
   }
 

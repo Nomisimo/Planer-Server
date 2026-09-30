@@ -139,17 +139,18 @@ class Sitzung {
     if (!angewendet.length) return client.sendJson({ type: "ack", txId, seq: this.seq, ops: [], skipped, conflicts, result });
 
     const vorher = this.doc;
-    this.doc = next;
-    this.seq += 1;
-    const seq = this.seq;
-    for (const o of angewendet) this.feldSeq.set(opKey(o), { seq, user: client.user.id, name: client.user.name });
+    const seq = this.seq + 1;
     const eintrag = { seq, user: client.user.id, name: client.user.name, txId, ops: angewendet, zeit: Date.now() };
+    this.hub.store.anhaengen(this.app, this.id, eintrag); // erst sicher ablegen, dann übernehmen
+    this.doc = next;
+    this.seq = seq;
+    for (const o of angewendet) this.feldSeq.set(opKey(o), { seq, user: client.user.id, name: client.user.name });
     this.recent.push(eintrag);
     if (this.recent.length > RECENT) this.recent.shift();
     this.meta.geaendert = new Date().toISOString();
-    this.hub.store.anhaengen(this.app, this.id, eintrag);
     const texte = angewendet.slice(0, VERLAUF_TEXTE).map((o) => beschreibe(o, o.op === "rem" || o.op === "del" ? vorher : next, modul.labels));
-    this.hub.store.verlauf(this.app, this.id, { seq, zeit: eintrag.zeit, user: client.user.id, name: client.user.name, absicht: intent?.name || null, anzahl: angewendet.length, texte });
+    try { this.hub.store.verlauf(this.app, this.id, { seq, zeit: eintrag.zeit, user: client.user.id, name: client.user.name, absicht: intent?.name || null, anzahl: angewendet.length, texte }); }
+    catch (e) { console.error("Verlauf nicht geschrieben:", e.message); }
     this.nachSchreiben();
     client.sendJson({ type: "ack", txId, seq, ops: angewendet, skipped, conflicts, result });
     this.senden({ type: "applied", seq, user: client.user.id, name: client.user.name, txId, ops: angewendet }, client);
@@ -236,12 +237,12 @@ export class Hub {
         return this.hello(client, m, fehler);
       }
       const s = client.sitzung;
-      if (m.type === "tx") return s.tx(client, m);
-      if (m.type === "presence") { client.user.presence = m.data; return s.senden({ type: "presence", user: client.user.id, data: m.data }, client); }
-      if (m.type === "sperre") return s.sperre(client, m.path);
-      if (m.type === "freigabe") return s.freigabe(client, m.path);
-      if (m.type === "verlauf") return client.sendJson({ type: "verlauf", eintraege: this.store.leseVerlauf(s.app, s.id, m) });
-      if (m.type === "ping") return client.sendJson({ type: "pong" });
+      try { return this.nachricht(client, s, m); }
+      catch (e) {
+        // Ein Fehler (z. B. Datenträger voll) darf nie den ganzen Server beenden
+        console.error(`Fehler in Sitzung ${s.app}/${s.id}:`, e);
+        if (m.type === "tx") client.sendJson({ type: "reject", txId: m.txId, reason: "serverfehler", detail: e.message });
+      }
     });
     ws.on("close", () => {
       clearTimeout(helloTimer);
@@ -254,6 +255,16 @@ export class Hub {
       if (!s.clients.size) s.sichern();
     });
     return client;
+  }
+
+
+  nachricht(client, s, m) {
+    if (m.type === "tx") return s.tx(client, m);
+    if (m.type === "presence") { client.user.presence = m.data; return s.senden({ type: "presence", user: client.user.id, data: m.data }, client); }
+    if (m.type === "sperre") return s.sperre(client, m.path);
+    if (m.type === "freigabe") return s.freigabe(client, m.path);
+    if (m.type === "verlauf") return client.sendJson({ type: "verlauf", eintraege: this.store.leseVerlauf(s.app, s.id, m) });
+    if (m.type === "ping") return client.sendJson({ type: "pong" });
   }
 
   hello(client, m, fehler) {
