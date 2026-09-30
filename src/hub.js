@@ -8,6 +8,9 @@
 // S→*  applied  { seq, user, txId, ops }
 // C↔S  presence { data }  →  S→* presence { user, data }   (flüchtig, ohne seq)
 // S→*  users    { users }
+// C→S  sperre   { path }  Feld wird gerade bearbeitet (erneuern beim Tippen), freigabe { path? }
+// S→*  sperren  { sperren: [{ key, path, user, name }] }
+// C→S  verlauf  { vor?, limit? }  →  S→C verlauf { eintraege }   (Verlauf aller Nutzer)
 // S→C  error    { reason, detail }   danach wird die Verbindung geschlossen
 import crypto from "node:crypto";
 import { apply, diff, pathKey } from "./ops.js";
@@ -17,6 +20,8 @@ export const PROTO = 1;
 const RECENT = 1000;          // so viele Transaktionen reichen für Reconnect ohne Snapshot
 const SNAPSHOT_ALLE = 200;    // Transaktionen
 const SNAPSHOT_RUHE = 10_000; // ms nach der letzten Änderung
+const SPERRE_MS = 120_000;   // Feldsperre verfällt ohne Erneuerung
+const VERLAUF_TEXTE = 8;     // so viele Einzelbeschreibungen je Verlaufseintrag
 const FARBEN = ["#e6194b", "#3cb44b", "#4363d8", "#f58231", "#911eb4", "#42d4f4", "#f032e6", "#9a6324", "#469990", "#800000"];
 
 const clone = (x) => JSON.parse(JSON.stringify(x));
@@ -30,6 +35,26 @@ export const neueId = () => crypto.randomBytes(9).toString("base64url");
 // Schlüssel eines Ops für Last-Writer-Wins (ins/rem adressieren das Element selbst)
 const opKey = (o) => (o.op === "ins" ? pathKey([...o.path, { id: o.value.id }]) : o.op === "rem" ? pathKey([...o.path, { id: o.id }]) : pathKey(o.path));
 const vorfahren = (key) => { const t = key.split("/"); return t.map((_, i) => t.slice(0, i + 1).join("/")); };
+// Überschneiden sich zwei Pfade (gleich, oder einer liegt im anderen)?
+const ueberlappt = (a, b) => a === b || a.startsWith(b + "/") || b.startsWith(a + "/");
+
+// Lesbare Beschreibung eines Ops für den Verlauf: IDs werden durch Namen ersetzt
+const beschreibe = (o, doc, labels = {}) => {
+  const teile = []; let cur = doc;
+  const pfad = o.op === "ins" ? [...o.path, { id: o.value.id }] : o.op === "rem" ? [...o.path, { id: o.id }] : o.path;
+  const alt = o.op === "rem" ? o.old : o.op === "ins" ? o.value : null;
+  for (const seg of pfad) {
+    if (seg && typeof seg === "object") {
+      const el = Array.isArray(cur) ? cur.find((x) => x?.id === seg.id) : null;
+      const n = el || (seg.id === alt?.id ? alt : null);
+      teile.push(`„${n?.name || n?.label || n?.vid || seg.id}“`);
+      cur = el;
+    } else { teile.push(labels[seg] || seg); cur = cur?.[seg]; }
+  }
+  const was = { set: "geändert", del: "entfernt", ins: "angelegt", rem: "gelöscht", order: "umsortiert", add: "ergänzt", drop: "entfernt" }[o.op];
+  const wert = o.op === "set" && (typeof o.value !== "object" || o.value === null) ? `: ${JSON.stringify(o.old ?? "")} → ${JSON.stringify(o.value)}` : o.op === "add" || o.op === "drop" ? ` (${o.value})` : "";
+  return `${teile.join(" › ")} ${was}${wert}`;
+};
 
 class Sitzung {
   constructor(hub, { meta, seq, doc }) {
@@ -42,6 +67,7 @@ class Sitzung {
     this.clients = new Set();
     this.seitSnapshot = 0;
     this.timer = null;
+    this.sperren = new Map(); // pathKey → { path, user, name, bis }
   }
   get id() { return this.meta.id; }
   get app() { return this.meta.app; }
@@ -51,6 +77,35 @@ class Sitzung {
   }
   users() { return [...this.clients].map((c) => c.user); }
   senden(msg, ausser) { const s = JSON.stringify(msg); for (const c of this.clients) if (c !== ausser) c.send(s); }
+
+  /* Feldsperren: Wer in einem Feld tippt, sperrt es für die anderen (mit Hinweis in deren App). */
+  aktuelleSperren() {
+    const jetzt = Date.now();
+    for (const [k, l] of this.sperren) if (l.bis < jetzt) this.sperren.delete(k);
+    return [...this.sperren].map(([key, l]) => ({ key, path: l.path, user: l.user, name: l.name }));
+  }
+  sperrenSenden() { this.senden({ type: "sperren", sperren: this.aktuelleSperren() }); }
+  sperre(client, path) {
+    if (!Array.isArray(path) || !path.length) return;
+    const key = pathKey(path);
+    const fremd = this.aktuelleSperren().find((l) => l.user !== client.user.id && ueberlappt(l.key, key));
+    if (fremd) return client.sendJson({ type: "sperre-abgelehnt", path, von: fremd.name });
+    const neu = !this.sperren.has(key) || this.sperren.get(key).user !== client.user.id;
+    for (const [k, l] of this.sperren) if (l.user === client.user.id && k !== key) this.sperren.delete(k); // eine Sperre je Person
+    this.sperren.set(key, { path, user: client.user.id, name: client.user.name, bis: Date.now() + SPERRE_MS });
+    if (neu) this.sperrenSenden();
+  }
+  freigabe(client, path) {
+    let geaendert = false;
+    for (const [k, l] of this.sperren) if (l.user === client.user.id && (!path || k === pathKey(path))) { this.sperren.delete(k); geaendert = true; }
+    if (geaendert) this.sperrenSenden();
+  }
+  gesperrtFuer(client, ops) {
+    const fremde = this.aktuelleSperren().filter((l) => l.user !== client.user.id);
+    if (!fremde.length) return null;
+    for (const o of ops) { const k = opKey(o); const l = fremde.find((x) => ueberlappt(x.key, k)); if (l) return l; }
+    return null;
+  }
 
   // Eine Transaktion prüfen und anwenden. Alles oder nichts.
   tx(client, { txId, baseSeq = this.seq, ops, intent }) {
@@ -70,6 +125,8 @@ class Sitzung {
       catch (e) { return client.sendJson({ type: "reject", txId, reason: "ungueltig", detail: e.message }); }
       angewendet = ops.filter((o) => !skipped.includes(o));
     }
+    const gesperrt = this.gesperrtFuer(client, angewendet);
+    if (gesperrt) return client.sendJson({ type: "reject", txId, reason: "gesperrt", detail: `${gesperrt.name} bearbeitet dieses Feld gerade`, path: gesperrt.path });
     const verstoesse = modul.pruefe(this.doc, next);
     if (verstoesse.length) return client.sendJson({ type: "reject", txId, reason: "invariante", detail: verstoesse });
 
@@ -81,6 +138,7 @@ class Sitzung {
     }
     if (!angewendet.length) return client.sendJson({ type: "ack", txId, seq: this.seq, ops: [], skipped, conflicts, result });
 
+    const vorher = this.doc;
     this.doc = next;
     this.seq += 1;
     const seq = this.seq;
@@ -90,6 +148,8 @@ class Sitzung {
     if (this.recent.length > RECENT) this.recent.shift();
     this.meta.geaendert = new Date().toISOString();
     this.hub.store.anhaengen(this.app, this.id, eintrag);
+    const texte = angewendet.slice(0, VERLAUF_TEXTE).map((o) => beschreibe(o, o.op === "rem" || o.op === "del" ? vorher : next, modul.labels));
+    this.hub.store.verlauf(this.app, this.id, { seq, zeit: eintrag.zeit, user: client.user.id, name: client.user.name, absicht: intent?.name || null, anzahl: angewendet.length, texte });
     this.nachSchreiben();
     client.sendJson({ type: "ack", txId, seq, ops: angewendet, skipped, conflicts, result });
     this.senden({ type: "applied", seq, user: client.user.id, name: client.user.name, txId, ops: angewendet }, client);
@@ -178,6 +238,9 @@ export class Hub {
       const s = client.sitzung;
       if (m.type === "tx") return s.tx(client, m);
       if (m.type === "presence") { client.user.presence = m.data; return s.senden({ type: "presence", user: client.user.id, data: m.data }, client); }
+      if (m.type === "sperre") return s.sperre(client, m.path);
+      if (m.type === "freigabe") return s.freigabe(client, m.path);
+      if (m.type === "verlauf") return client.sendJson({ type: "verlauf", eintraege: this.store.leseVerlauf(s.app, s.id, m) });
       if (m.type === "ping") return client.sendJson({ type: "pong" });
     });
     ws.on("close", () => {
@@ -185,6 +248,8 @@ export class Hub {
       const s = client.sitzung;
       if (!s) return;
       s.clients.delete(client);
+      if ([...s.clients].some((c) => c.user.id === client.user.id)) return; // durch neue Verbindung ersetzt
+      s.freigabe(client);
       s.senden({ type: "users", users: s.users() });
       if (!s.clients.size) s.sichern();
     });
@@ -215,7 +280,7 @@ export class Hub {
     s.clients.add(client);
     const nachhol = typeof m.lastSeq === "number" && m.lastSeq <= s.seq && (m.lastSeq === s.seq || s.recent[0]?.seq <= m.lastSeq + 1)
       ? s.recent.filter((t) => t.seq > m.lastSeq) : null;
-    client.sendJson({ type: "welcome", session: s.info(), seq: s.seq, ...(nachhol ? { ops: nachhol } : { doc: s.doc }), you: client.user, users: s.users(), migrieren });
+    client.sendJson({ type: "welcome", session: s.info(), seq: s.seq, ...(nachhol ? { ops: nachhol } : { doc: s.doc }), you: client.user, users: s.users(), sperren: s.aktuelleSperren(), migrieren });
     s.senden({ type: "users", users: s.users() }, client);
   }
 

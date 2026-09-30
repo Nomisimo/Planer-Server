@@ -5,6 +5,7 @@
 // GET    /api/sessions?app=netzwerkplaner  Sitzungen einer App
 // POST   /api/sessions                     { app, name, code?, appVersion, doc } → Sitzung anlegen
 // GET    /api/sessions/:id/doc             aktueller Stand (Kopie speichern), Header X-Session-Code
+// GET    /api/sessions/:id/verlauf         Verlauf aller Nutzer (?vor=seq&limit=100)
 // DELETE /api/sessions/:id                 Header X-Session-Code
 // WS     /ws                               Echtzeit-Protokoll, siehe hub.js
 //
@@ -63,6 +64,7 @@ export const starteServer = ({ port = 3001, dataDir = "./data", authToken = "", 
         const cf = hub.pruefeCode(s, req.headers["x-session-code"], ipOf(req));
         if (cf) return json(res, 403, { error: cf });
         if (p.length === 4 && p[3] === "doc" && req.method === "GET") return json(res, 200, { seq: s.seq, doc: s.doc });
+        if (p.length === 4 && p[3] === "verlauf" && req.method === "GET") return json(res, 200, hub.store.leseVerlauf(s.app, s.id, { vor: +url.searchParams.get("vor") || Infinity, limit: url.searchParams.get("limit") }));
         if (p.length === 3 && req.method === "DELETE") { hub.loeschen(s.id); return json(res, 200, { ok: true }); }
       }
 

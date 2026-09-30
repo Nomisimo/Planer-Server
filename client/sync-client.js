@@ -9,6 +9,8 @@
 //   sync.submit(ops)                     Operationen aus diff(prev, next)
 //   await sync.intent("connect", {...})  Absicht, die der Server ausführt (wartet auf Bestätigung)
 //   sync.presence({ tab, auswahl })
+//   sync.sperre(path) / sync.freigabe()  Feld beim Tippen sperren (onSperren meldet fremde Sperren)
+//   await sync.verlauf({ vor, limit })   Verlauf aller Nutzer, neueste zuerst
 //   sync.close()
 import { apply } from "./ops.js";
 
@@ -19,7 +21,7 @@ export const createSyncClient = (o) => {
   const WS = o.WebSocket || globalThis.WebSocket;
   const clientId = o.clientId || zufall();
   let ws = null, bestaetigt = null, lokal = null, seq = 0, info = null, geschlossen = false, versuch = 0, timer = null;
-  let pending = []; // { txId, baseSeq, ops?, intent?, resolve?, reject?, gesendet }
+  let pending = [], sperren = [], verlaufWartet = []; // { txId, baseSeq, ops?, intent?, resolve?, reject?, gesendet }
   const status = (s, detail) => o.onStatus?.(s, detail);
 
   const neuAufsetzen = () => {
@@ -45,6 +47,7 @@ export const createSyncClient = (o) => {
         else for (const t of m.ops) apply(bestaetigt, t.ops);
         seq = m.seq;
         o.onUsers?.(m.users, m.you);
+        sperren = m.sperren || []; o.onSperren?.(sperren);
         status("online", { pending: pending.length });
         neuAufsetzen();
         for (const t of pending) sendeTx(t); // Warteschlange nach Abbruch neu einspielen
@@ -71,6 +74,9 @@ export const createSyncClient = (o) => {
         o.onHinweis?.({ art: "abgelehnt", reason: m.reason, detail: m.detail, txId: m.txId });
         t?.reject?.(Object.assign(new Error(typeof m.detail === "string" ? m.detail : m.reason), { reason: m.reason, detail: m.detail }));
       } else if (m.type === "users") o.onUsers?.(m.users);
+      else if (m.type === "sperren") { sperren = m.sperren; o.onSperren?.(sperren); }
+      else if (m.type === "sperre-abgelehnt") o.onHinweis?.({ art: "gesperrt", path: m.path, von: m.von });
+      else if (m.type === "verlauf") verlaufWartet.shift()?.(m.eintraege);
       else if (m.type === "presence") o.onPresence?.(m.user, m.data);
       else if (m.type === "error") { status("fehler", m); if (["code-falsch", "token", "version", "unbekannt", "protokoll", "sitzung-geloescht"].includes(m.reason)) geschlossen = true; }
     };
@@ -107,6 +113,17 @@ export const createSyncClient = (o) => {
       });
     },
     presence(data) { senden({ type: "presence", data }); },
+    get sperren() { return sperren; },
+    sperre(path) { senden({ type: "sperre", path }); },
+    freigabe(path) { senden({ type: "freigabe", path }); },
+    verlauf({ vor, limit } = {}) {
+      return new Promise((resolve, reject) => {
+        if (!senden({ type: "verlauf", vor, limit })) return reject(new Error("Keine Verbindung zum Server"));
+        verlaufWartet.push(resolve);
+      });
+    },
+    // Lokale Kopie zum Speichern; nach Sitzungsende oder offline als veraltet markiert
+    kopie() { return { doc: clone(lokal), seq, veraltet: !api.online, ausstehend: pending.length }; },
     close() { geschlossen = true; clearTimeout(timer); ws?.close(); },
   };
   verbinden();

@@ -3,11 +3,11 @@
 // gilt nur die generische Regel: Operationen in Serverreihenfolge, Last-Writer-Wins je Feld.
 import { netzwerkplaner } from "./netzwerkplaner.js";
 
-export const generisch = (id, name) => ({ id, name, intents: {}, pruefe: () => [] });
+export const generisch = (id, name, labels = {}) => ({ id, name, labels, intents: {}, pruefe: () => [] });
 
 export const APPS = {
   netzwerkplaner,
-  stromplaner: generisch("stromplaner", "Stromplaner"),
+  stromplaner: generisch("stromplaner", "Stromplaner", { instances: "Verteiler", loads: "Verbraucher", boxTypes: "Verteilertyp", mainConns: "Einspeisung", placements: "Platzierung", meta: "Projekt" }),
 };
 
 export const appModul = (id) => (Object.hasOwn(APPS, id) ? APPS[id] : null);

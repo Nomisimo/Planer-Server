@@ -171,3 +171,39 @@ test("Drei Clients, zufällige gleichzeitige Änderungen: alle landen beim selbe
     assert.deepEqual(C[0].doc, u.srv.hub.sitzungen.get(s.id).doc);
   } finally { await u.ende(); }
 });
+
+test("Feldsperre und gemeinsamer Verlauf", async () => {
+  const u = await umgebung();
+  try {
+    const s = await (await u.req("/api/sessions", { method: "POST", body: JSON.stringify({ app: "netzwerkplaner", name: "Sperre", doc: clone(demoProject()), appVersion: "0.6.0" }) })).json();
+    const hB = []; let sperrenB = [];
+    const A = u.client({ app: "netzwerkplaner", session: s.id, name: "Anna" });
+    const B = u.client({ app: "netzwerkplaner", session: s.id, name: "Ben", onHinweis: (h) => hB.push(h), onSperren: (x) => { sperrenB = x; } });
+    await bis(() => A.online && B.online);
+    const dev = A.doc.geraete[0];
+    const pfad = ["geraete", { id: dev.id }, "notizen"];
+    A.sperre(pfad);
+    await bis(() => sperrenB.length === 1);
+    assert.equal(sperrenB[0].name, "Anna");
+    // Ben schreibt trotzdem in das Feld: abgelehnt
+    aendern(B, (d) => { d.geraete[0].notizen = "Ben"; });
+    await bis(() => hB.some((h) => h.art === "abgelehnt" && h.reason === "gesperrt"));
+    // Ben will das Gerät löschen, während Anna darin tippt: ebenfalls gesperrt
+    await assert.rejects(B.intent("loescheGeraete", { ids: [dev.id] }), /bearbeitet/);
+    // Ben will dasselbe Feld sperren: Hinweis
+    B.sperre(pfad);
+    await bis(() => hB.some((h) => h.art === "gesperrt" && h.von === "Anna"));
+    // Anna tippt, gibt frei, danach darf Ben
+    aendern(A, (d) => { d.geraete[0].notizen = "Anna"; });
+    A.freigabe();
+    await bis(() => sperrenB.length === 0);
+    aendern(B, (d) => { d.geraete[0].name = "Pult neu"; });
+    await bis(() => !A.ausstehend && !B.ausstehend && A.seq === 2 && B.seq === 2);
+
+    const v = await B.verlauf();
+    assert.deepEqual(v.map((e) => e.name), ["Ben", "Anna"]);
+    assert.match(v[0].texte[0], /^Gerät › „.*“ › name geändert: ".*" → "Pult neu"$/);
+    const http = await (await u.req(`/api/sessions/${s.id}/verlauf?limit=1`)).json();
+    assert.equal(http.length, 1);
+  } finally { await u.ende(); }
+});

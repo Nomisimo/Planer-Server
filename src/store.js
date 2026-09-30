@@ -2,6 +2,7 @@
 //   meta.json      Name, App, App-Version, Sitzungscode (gehasht), Zeiten
 //   snapshot.json  { seq, doc }  kanonischer Stand
 //   ops.jsonl      Transaktionen seit dem Snapshot (eine Zeile je Transaktion)
+//   verlauf.jsonl  Verlauf aller Nutzer (wer, wann, was), wird nicht gekürzt
 //   backups/       stündliche Snapshots, die letzten 48 bleiben
 import fs from "node:fs";
 import path from "node:path";
@@ -75,6 +76,23 @@ export class Store {
       const alle = fs.readdirSync(b).filter((x) => x.endsWith(".json")).sort();
       for (const alt of alle.slice(0, Math.max(0, alle.length - BACKUPS))) fs.rmSync(path.join(b, alt));
     }
+  }
+
+  verlauf(app, id, eintrag) {
+    fs.appendFileSync(path.join(this.sitzungsDir(app, id), "verlauf.jsonl"), JSON.stringify(eintrag) + "\n");
+  }
+
+  // Neueste zuerst; `vor` = nur Einträge mit kleinerer seq (zum Blättern)
+  leseVerlauf(app, id, { vor = Infinity, limit = 100 } = {}) {
+    const f = path.join(this.sitzungsDir(app, id), "verlauf.jsonl");
+    if (!fs.existsSync(f)) return [];
+    const out = [];
+    const zeilen = fs.readFileSync(f, "utf8").split("\n");
+    for (let i = zeilen.length - 1; i >= 0 && out.length < Math.min(+limit || 100, 500); i--) {
+      if (!zeilen[i].trim()) continue;
+      try { const e = JSON.parse(zeilen[i]); if (e.seq < vor) out.push(e); } catch { /* abgerissene Zeile */ }
+    }
+    return out;
   }
 
   loesche(app, id) {
