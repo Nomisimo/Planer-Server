@@ -1,0 +1,7 @@
+node_modules
+dist
+dist-test
+data
+.git
+netzwerkplaner/node_modules
+netzwerkplaner/.git

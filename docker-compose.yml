@@ -1,0 +1,11 @@
+services:
+  planer-server:
+    build: .
+    ports:
+      - "3001:3001"
+    volumes:
+      - ./data:/data
+    environment:
+      - PORT=3001
+      # - AUTH_TOKEN=dein-geheimer-token
+    restart: unless-stopped
