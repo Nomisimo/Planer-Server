@@ -17,10 +17,27 @@ import { apply } from "./ops.js";
 const clone = (x) => JSON.parse(JSON.stringify(x));
 const zufall = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
 
+// Versionen vergleichen (0.7.0-beta.8 < 0.7.0-beta.10 < 0.7.0): < 0, 0 oder > 0
+export const vergleicheVersion = (a, b) => {
+  const teile = (v) => { const [kern, vor] = String(v || "").split("-"); return { k: kern.split(".").map((x) => +x || 0), v: vor ? vor.split(".").map((x) => (isNaN(+x) ? x : +x)) : null }; };
+  const x = teile(a), y = teile(b);
+  for (let i = 0; i < 3; i++) if ((x.k[i] || 0) !== (y.k[i] || 0)) return (x.k[i] || 0) - (y.k[i] || 0);
+  if (!x.v || !y.v) return x.v ? -1 : y.v ? 1 : 0; // Vorabversion < fertige Version
+  for (let i = 0; i < Math.max(x.v.length, y.v.length); i++) {
+    const p = x.v[i], q = y.v[i];
+    if (p === q) continue;
+    if (p === undefined) return -1;
+    if (q === undefined) return 1;
+    if (typeof p === "number" && typeof q === "number") return p - q;
+    return String(p) < String(q) ? -1 : 1;
+  }
+  return 0;
+};
+
 export const createSyncClient = (o) => {
   const WS = o.WebSocket || globalThis.WebSocket;
   const clientId = o.clientId || zufall();
-  let ws = null, bestaetigt = null, lokal = null, seq = 0, info = null, geschlossen = false, versuch = 0, timer = null;
+  let ws = null, bestaetigt = null, lokal = null, seq = 0, info = null, geschlossen = false, selbst = null, letzterFehler = null, versuch = 0, timer = null;
   let pending = [], sperren = [], verlaufWartet = []; // { txId, baseSeq, ops?, intent?, resolve?, reject?, gesendet }
   const status = (s, detail) => o.onStatus?.(s, detail);
 
@@ -78,12 +95,14 @@ export const createSyncClient = (o) => {
       else if (m.type === "sperre-abgelehnt") o.onHinweis?.({ art: "gesperrt", path: m.path, von: m.von });
       else if (m.type === "verlauf") verlaufWartet.shift()?.(m.eintraege);
       else if (m.type === "presence") o.onPresence?.(m.user, m.data);
-      else if (m.type === "error") { status("fehler", m); if (["code-falsch", "token", "version", "unbekannt", "protokoll", "sitzung-geloescht"].includes(m.reason)) geschlossen = true; }
+      else if (m.type === "error") { letzterFehler = m; status("fehler", m); if (["code-falsch", "token", "version", "unbekannt", "protokoll", "sitzung-geloescht"].includes(m.reason)) geschlossen = true; }
     };
     ws.onclose = () => {
       ws = null;
       for (const t of pending) t.gesendet = false;
-      if (geschlossen) return status("beendet");
+      if (selbst) return selbst(); // selbst verlassen oder beendet: keine Meldung
+      // warVerbunden: false = Beitritt gescheitert (nichts ersetzt), true = laufende Sitzung ist vorbei
+      if (geschlossen) return status("beendet", { warVerbunden: !!bestaetigt, reason: letzterFehler?.reason, detail: letzterFehler?.detail });
       status("offline", { pending: pending.length });
       versuch += 1;
       timer = setTimeout(verbinden, Math.min(15_000, 500 * 2 ** Math.min(versuch, 5)));
@@ -124,7 +143,17 @@ export const createSyncClient = (o) => {
     },
     // Lokale Kopie zum Speichern; nach Sitzungsende oder offline als veraltet markiert
     kopie() { return { doc: clone(lokal), seq, veraltet: !api.online, ausstehend: pending.length }; },
-    close() { geschlossen = true; clearTimeout(timer); ws?.close(); },
+    close() { geschlossen = true; selbst = () => {}; clearTimeout(timer); ws?.close(); },
+    // Sitzung für alle beenden; die anderen bekommen „sitzung-geloescht“ und behalten eine veraltete Kopie
+    beenden() {
+      return new Promise((resolve, reject) => {
+        if (!api.online) return reject(new Error("Keine Verbindung zum Server"));
+        // Ein älterer Server kennt „beenden“ nicht und antwortet nicht: dann nach 5 s abbrechen
+        const t = setTimeout(() => { geschlossen = false; selbst = null; reject(new Error("Der Planer-Server kann das noch nicht, bitte den Server aktualisieren")); }, 5000);
+        geschlossen = true; selbst = () => { clearTimeout(t); resolve(); }; clearTimeout(timer);
+        senden({ type: "beenden" });
+      });
+    },
   };
   verbinden();
   return api;

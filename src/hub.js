@@ -11,16 +11,21 @@
 // C→S  sperre   { path }  Feld wird gerade bearbeitet (erneuern beim Tippen), freigabe { path? }
 // S→*  sperren  { sperren: [{ key, path, user, name }] }
 // C→S  verlauf  { vor?, limit? }  →  S→C verlauf { eintraege }   (Verlauf aller Nutzer)
+// C→S  beenden  {}  Sitzung für alle beenden → S→* error { reason: "sitzung-geloescht", detail: { von } }
 // S→C  error    { reason, detail }   danach wird die Verbindung geschlossen
 import crypto from "node:crypto";
 import { apply, diff, pathKey, valueAt } from "./ops.js";
 import { appModul } from "./apps/index.js";
+import { vergleicheVersion } from "../client/sync-client.js";
+
+export { vergleicheVersion };
 
 export const PROTO = 1;
 const RECENT = 1000;          // so viele Transaktionen reichen für Reconnect ohne Snapshot
 const SNAPSHOT_ALLE = 200;    // Transaktionen
 const SNAPSHOT_RUHE = 10_000; // ms nach der letzten Änderung
 const SPERRE_MS = 120_000;   // Feldsperre verfällt ohne Erneuerung
+const LEER_BEENDBAR_MS = 72 * 3600_000; // so lange ohne Teilnehmer, dann darf man die Sitzung von außen beenden
 const VERLAUF_TEXTE = 8;     // so viele Einzelbeschreibungen je Verlaufseintrag
 const FARBEN = ["#e6194b", "#3cb44b", "#4363d8", "#f58231", "#911eb4", "#42d4f4", "#f032e6", "#9a6324", "#469990", "#800000"];
 
@@ -78,13 +83,19 @@ class Sitzung {
     this.seitSnapshot = 0;
     this.timer = null;
     this.sperren = new Map(); // pathKey → { path, user, name, bis }
+    // Seit wann niemand verbunden ist (für „extern beenden“ nach 72 h). Nach einem Neustart ist niemand da.
+    if (!this.meta.leerSeit) this.meta.leerSeit = this.meta.geaendert || this.meta.erstellt;
   }
   get id() { return this.meta.id; }
   get app() { return this.meta.app; }
 
   info() {
-    return { id: this.id, app: this.app, name: this.meta.name, appVersion: this.meta.appVersion, seq: this.seq, users: this.users().length, codeNoetig: !!this.meta.codeHash, geaendert: this.meta.geaendert, erstellt: this.meta.erstellt };
+    const users = this.users().length;
+    const leerSeit = users ? null : this.meta.leerSeit;
+    return { id: this.id, app: this.app, name: this.meta.name, appVersion: this.meta.appVersion, seq: this.seq, users, codeNoetig: !!this.meta.codeHash, geaendert: this.meta.geaendert, erstellt: this.meta.erstellt, leerSeit, beendbar: this.beendbar() };
   }
+  // Von außen (ohne Beitritt) beenden darf man nur eine Sitzung, die lange niemand mehr genutzt hat
+  beendbar() { return !this.clients.size && Date.now() - Date.parse(this.meta.leerSeit || 0) >= this.hub.leerBeendbarMs; }
   users() { return [...this.clients].map((c) => c.user); }
   senden(msg, ausser) { const s = JSON.stringify(msg); for (const c of this.clients) if (c !== ausser) c.send(s); }
 
@@ -184,9 +195,10 @@ class Sitzung {
 }
 
 export class Hub {
-  constructor({ store, authToken = "" }) {
+  constructor({ store, authToken = "", leerBeendbarMs = LEER_BEENDBAR_MS }) {
     this.store = store;
     this.authToken = authToken;
+    this.leerBeendbarMs = leerBeendbarMs;
     this.sitzungen = new Map();
     this.fehlversuche = new Map(); // ip → { n, bis }
     for (const s of store.ladeAlle(apply)) this.sitzungen.set(s.meta.id, new Sitzung(this, s));
@@ -198,7 +210,7 @@ export class Hub {
     if (!appModul(app)) throw Object.assign(new Error(`Unbekannte App: ${app}`), { status: 400 });
     if (!doc || typeof doc !== "object") throw Object.assign(new Error("Plan fehlt"), { status: 400 });
     const jetzt = new Date().toISOString();
-    const meta = { id: neueId(), app, name: String(name || "Sitzung").slice(0, 120), appVersion: String(appVersion || ""), codeHash: code ? hash(code) : null, erstellt: jetzt, geaendert: jetzt };
+    const meta = { id: neueId(), app, name: String(name || "Sitzung").slice(0, 120), appVersion: String(appVersion || ""), codeHash: code ? hash(code) : null, erstellt: jetzt, geaendert: jetzt, leerSeit: jetzt };
     this.store.schreibeMeta(app, meta.id, meta);
     this.store.snapshot(app, meta.id, 0, doc);
     const s = new Sitzung(this, { meta, seq: 0, doc });
@@ -206,10 +218,12 @@ export class Hub {
     return s.info();
   }
 
-  loeschen(id) {
+  // Sitzung für alle beenden. Die Verbundenen behalten ihren Stand als veraltete Kopie (in der App).
+  loeschen(id, von = null) {
     const s = this.sitzungen.get(id);
     if (!s) return false;
-    s.senden({ type: "error", reason: "sitzung-geloescht" });
+    s.sichern();
+    s.senden({ type: "error", reason: "sitzung-geloescht", detail: von ? { von: von.user.name } : null }, von);
     for (const c of s.clients) c.close(4000, "sitzung-geloescht");
     clearTimeout(s.timer);
     this.sitzungen.delete(id);
@@ -263,7 +277,11 @@ export class Hub {
       if ([...s.clients].some((c) => c.user.id === client.user.id)) return; // durch neue Verbindung ersetzt
       s.freigabe(client);
       s.senden({ type: "users", users: s.users() });
-      if (!s.clients.size) s.sichern();
+      if (!s.clients.size && this.sitzungen.has(s.id)) {
+        s.sichern();
+        s.meta.leerSeit = new Date().toISOString();
+        this.store.schreibeMeta(s.app, s.id, s.meta);
+      }
     });
     return client;
   }
@@ -276,6 +294,7 @@ export class Hub {
     if (m.type === "freigabe") return s.freigabe(client, m.path);
     if (m.type === "verlauf") return client.sendJson({ type: "verlauf", eintraege: this.store.leseVerlauf(s.app, s.id, m) });
     if (m.type === "ping") return client.sendJson({ type: "pong" });
+    if (m.type === "beenden") return this.loeschen(s.id, client);
   }
 
   hello(client, m, fehler) {
@@ -287,9 +306,10 @@ export class Hub {
     if (cf) return fehler(cf, cf === "gesperrt" ? "Zu viele Fehlversuche, bitte eine Minute warten" : "Sitzungscode falsch");
     // Gleiche App-Version Pflicht. Ist niemand verbunden, übernimmt die Sitzung eine neuere Version;
     // der Client migriert dann den Plan und schickt das Ergebnis als normale Transaktion.
+    // Eine ältere App darf eine neuere Sitzung nie übernehmen (sie kennt deren Daten nicht).
     let migrieren = false;
     if (m.appVersion !== s.meta.appVersion) {
-      if (s.clients.size) return fehler("version", `Die Sitzung läuft mit Version ${s.meta.appVersion}, du hast ${m.appVersion}`);
+      if (s.clients.size || vergleicheVersion(m.appVersion, s.meta.appVersion) < 0) return fehler("version", `Die Sitzung läuft mit Version ${s.meta.appVersion}, du hast ${m.appVersion}`);
       s.meta.appVersion = String(m.appVersion || "");
       this.store.schreibeMeta(s.app, s.id, s.meta);
       migrieren = true;
@@ -300,6 +320,7 @@ export class Hub {
     for (const c of s.clients) if (c.user.id === client.user.id) c.close(4002, "ersetzt");
     client.sitzung = s;
     s.clients.add(client);
+    s.meta.leerSeit = null;
     const nachhol = typeof m.lastSeq === "number" && m.lastSeq <= s.seq && (m.lastSeq === s.seq || s.recent[0]?.seq <= m.lastSeq + 1)
       ? s.recent.filter((t) => t.seq > m.lastSeq) : null;
     client.sendJson({ type: "welcome", session: s.info(), seq: s.seq, ...(nachhol ? { ops: nachhol } : { doc: s.doc }), you: client.user, users: s.users(), sperren: s.aktuelleSperren(), migrieren });

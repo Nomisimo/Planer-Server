@@ -17,6 +17,7 @@ Der Server lauscht auf Port **3001** (wie der bisherige Stromplaner-Sync-Server)
 |---|---|---|
 | `PORT` | 3001 | Port für HTTP und WebSocket |
 | `DATA_DIR` | `/data` | Sitzungen, Snapshots, Sicherungen, Stromplaner-Pläne |
+| `LEER_BEENDBAR_STUNDEN` | 72 | So lange ohne Teilnehmer, dann lässt sich eine Sitzung in der App von außen beenden (ohne Beitritt) |
 | `AUTH_TOKEN` | leer | Wenn gesetzt, gilt er für alle Anfragen (`Authorization: Bearer …`) und im WebSocket-`hello` |
 
 Ohne TLS gedacht für das eigene LAN. Aus dem Internet erreichbar nur hinter einem Reverse-Proxy mit HTTPS (dann `wss://`).

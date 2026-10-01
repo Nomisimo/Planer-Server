@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import WebSocket from "ws";
 import { starteServer } from "../src/server.js";
+import { vergleicheVersion } from "../src/hub.js";
 import { createSyncClient } from "../client/sync-client.js";
 import { diff } from "../src/ops.js";
 import { demoProject } from "@netzwerkplaner/demo.js";
@@ -222,5 +223,79 @@ test("Automatiken auf mehreren Clients: gleiches Schreiben ist kein Konflikt", a
     assert.deepEqual(A.doc, B.doc);
     assert.equal(A.doc.icons.filter((i) => i.id === "ic1").length, 1);
     assert.deepEqual(h, []);
+  } finally { await u.ende(); }
+});
+
+test("Sitzung für alle beenden: die anderen bekommen eine veraltete Kopie, der Beendende keine Meldung", async () => {
+  const u = await umgebung();
+  try {
+    const s = await (await u.req("/api/sessions", { method: "POST", body: JSON.stringify({ app: "netzwerkplaner", name: "Ende", doc: clone(demoProject()), appVersion: "0.6.0" }) })).json();
+    const stA = [], stB = [];
+    const A = u.client({ app: "netzwerkplaner", session: s.id, name: "Anna", onStatus: (x, d) => stA.push([x, d]) });
+    const B = u.client({ app: "netzwerkplaner", session: s.id, name: "Ben", onStatus: (x, d) => stB.push([x, d]) });
+    await bis(() => A.online && B.online);
+    aendern(A, (d) => { d.meta.notiz = "noch schnell"; });
+    await bis(() => B.doc.meta.notiz === "noch schnell");
+    await B.beenden();
+    await bis(() => stA.some(([x]) => x === "beendet"));
+    const [, d] = stA.find(([x]) => x === "beendet");
+    assert.equal(d.warVerbunden, true);
+    assert.equal(d.reason, "sitzung-geloescht");
+    assert.equal(d.detail.von, "Ben");
+    assert.equal(A.doc.meta.notiz, "noch schnell"); // Kopie bleibt erhalten
+    assert.ok(!stB.some(([x]) => x === "beendet" || x === "fehler"));
+    assert.deepEqual(await (await u.req("/api/sessions?app=netzwerkplaner")).json(), []);
+    assert.ok(!fs.existsSync(path.join(u.dataDir, "netzwerkplaner", s.id)));
+
+    // Beitritt scheitert: kein „Sitzung beendet“, sondern warVerbunden = false
+    const t = await (await u.req("/api/sessions", { method: "POST", body: JSON.stringify({ app: "netzwerkplaner", name: "Code", code: "1", doc: clone(demoProject()), appVersion: "0.6.0" }) })).json();
+    const stC = [];
+    u.client({ app: "netzwerkplaner", session: t.id, code: "2", name: "C", onStatus: (x, d) => stC.push([x, d]) });
+    await bis(() => stC.some(([x]) => x === "beendet"));
+    assert.equal(stC.find(([x]) => x === "beendet")[1].warVerbunden, false);
+  } finally { await u.ende(); }
+});
+
+test("Von außen beenden erst nach langer Zeit ohne Teilnehmer, mit Sitzungscode", async () => {
+  const u = await umgebung({ leerBeendbarMs: 400 });
+  try {
+    const s = await (await u.req("/api/sessions", { method: "POST", body: JSON.stringify({ app: "netzwerkplaner", name: "Alt", code: "77", doc: clone(demoProject()), appVersion: "0.6.0" }) })).json();
+    assert.equal(s.beendbar, false);
+    const A = u.client({ app: "netzwerkplaner", session: s.id, code: "77", name: "Anna" });
+    await bis(() => A.online);
+    let info = (await (await u.req("/api/sessions?app=netzwerkplaner")).json())[0];
+    assert.equal(info.leerSeit, null);
+    const del = (code) => u.req(`/api/sessions/${s.id}`, { method: "DELETE", headers: { "X-Session-Code": code } });
+    assert.equal((await del("77")).status, 409); // jemand ist drin
+    A.close();
+    await warte(50);
+    info = (await (await u.req("/api/sessions?app=netzwerkplaner")).json())[0];
+    assert.ok(info.leerSeit);
+    assert.equal(info.beendbar, false);
+    assert.equal((await del("77")).status, 409); // erst kurz leer
+    await warte(450);
+    info = (await (await u.req("/api/sessions?app=netzwerkplaner")).json())[0];
+    assert.equal(info.beendbar, true);
+    assert.equal((await del("falsch")).status, 403);
+    assert.equal((await del("77")).status, 200);
+    assert.deepEqual(await (await u.req("/api/sessions?app=netzwerkplaner")).json(), []);
+  } finally { await u.ende(); }
+});
+
+test("Version: neuere App übernimmt eine leere Sitzung, ältere nie", async () => {
+  assert.ok(vergleicheVersion("0.7.0-beta.8", "0.7.0-beta.10") < 0);
+  assert.ok(vergleicheVersion("0.7.0-beta.10", "0.7.0") < 0);
+  assert.ok(vergleicheVersion("0.7.1", "0.7.0") > 0);
+  assert.equal(vergleicheVersion("0.7.0-beta.3", "0.7.0-beta.3"), 0);
+  const u = await umgebung();
+  try {
+    const s = await (await u.req("/api/sessions", { method: "POST", body: JSON.stringify({ app: "netzwerkplaner", name: "V", doc: clone(demoProject()), appVersion: "0.7.0-beta.5" }) })).json();
+    const st = [];
+    u.client({ app: "netzwerkplaner", session: s.id, name: "Alt", appVersion: "0.7.0-beta.4", onStatus: (x, d) => st.push(d?.reason || x) });
+    await bis(() => st.includes("version"));
+    let migriert = false;
+    const N = u.client({ app: "netzwerkplaner", session: s.id, name: "Neu", appVersion: "0.7.0-beta.6", onMigrieren: () => { migriert = true; return []; } });
+    await bis(() => N.online && migriert);
+    assert.equal((await (await u.req("/api/sessions?app=netzwerkplaner")).json())[0].appVersion, "0.7.0-beta.6");
   } finally { await u.ende(); }
 });

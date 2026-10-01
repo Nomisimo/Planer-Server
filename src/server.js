@@ -6,7 +6,8 @@
 // POST   /api/sessions                     { app, name, code?, appVersion, doc } → Sitzung anlegen
 // GET    /api/sessions/:id/doc             aktueller Stand (Kopie speichern), Header X-Session-Code
 // GET    /api/sessions/:id/verlauf         Verlauf aller Nutzer (?vor=seq&limit=100)
-// DELETE /api/sessions/:id                 Header X-Session-Code
+// DELETE /api/sessions/:id                 Header X-Session-Code; nur wenn seit 72 h niemand verbunden war
+//                                          (Teilnehmer beenden per WebSocket { type: "beenden" })
 // WS     /ws                               Echtzeit-Protokoll, siehe hub.js
 //
 // Stromplaner-kompatibel (bisheriger Sync-Server, unverändert nutzbar):
@@ -23,9 +24,9 @@ import { APPS } from "./apps/index.js";
 
 const MAX_BODY = 20 * 1024 * 1024;
 
-export const starteServer = ({ port = 3001, dataDir = "./data", authToken = "", host } = {}) => {
+export const starteServer = ({ port = 3001, dataDir = "./data", authToken = "", host, leerBeendbarMs } = {}) => {
   const store = new Store(dataDir);
-  const hub = new Hub({ store, authToken });
+  const hub = new Hub({ store, authToken, ...(leerBeendbarMs !== undefined ? { leerBeendbarMs } : {}) });
   const plansDir = path.join(dataDir, "stromplaner", "plans");
   fs.mkdirSync(plansDir, { recursive: true });
   const planFile = (id) => path.join(plansDir, `${id.replace(/[^a-zA-Z0-9_-]/g, "_")}.json`);
@@ -65,7 +66,11 @@ export const starteServer = ({ port = 3001, dataDir = "./data", authToken = "", 
         if (cf) return json(res, 403, { error: cf });
         if (p.length === 4 && p[3] === "doc" && req.method === "GET") return json(res, 200, { seq: s.seq, doc: s.doc });
         if (p.length === 4 && p[3] === "verlauf" && req.method === "GET") return json(res, 200, hub.store.leseVerlauf(s.app, s.id, { vor: +url.searchParams.get("vor") || Infinity, limit: url.searchParams.get("limit") }));
-        if (p.length === 3 && req.method === "DELETE") { hub.loeschen(s.id); return json(res, 200, { ok: true }); }
+        if (p.length === 3 && req.method === "DELETE") {
+          if (!s.beendbar()) return json(res, 409, { error: s.clients.size ? "Die Sitzung hat gerade Teilnehmer." : "Die Sitzung lässt sich erst nach 72 Stunden ohne Teilnehmer von außen beenden." });
+          hub.loeschen(s.id);
+          return json(res, 200, { ok: true });
+        }
       }
 
       if (p[0] === "api" && p[1] === "plans") {
@@ -113,7 +118,8 @@ export const starteServer = ({ port = 3001, dataDir = "./data", authToken = "", 
 if (process.argv[1] && /server\.(js|mjs|cjs)$/.test(process.argv[1]) && !process.env.PLANER_SERVER_NO_START) {
   const port = +(process.env.PORT || 3001);
   const dataDir = process.env.DATA_DIR || "./data";
-  starteServer({ port, dataDir, authToken: process.env.AUTH_TOKEN || "" }).then(({ stop }) => {
+  const leer = parseFloat(process.env.LEER_BEENDBAR_STUNDEN);
+  starteServer({ port, dataDir, authToken: process.env.AUTH_TOKEN || "", ...(leer >= 0 ? { leerBeendbarMs: leer * 3600_000 } : {}) }).then(({ stop }) => {
     console.log(`Planer-Server läuft auf Port ${port}, Daten in ${dataDir}${process.env.AUTH_TOKEN ? ", Token aktiv" : ""}`);
     const ende = () => stop().then(() => process.exit(0));
     process.on("SIGTERM", ende);
