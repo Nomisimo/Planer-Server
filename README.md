@@ -64,3 +64,7 @@ npm run dev
 ```
 
 `src/ops.js` und `client/ops.js` sind Kopien von `src/shared/ops.js` aus dem Netzwerkplaner.
+
+## Lizenz
+
+Copyright 2026 Nomisimo (Momo). Lizenziert unter der [Apache License 2.0](LICENSE). Siehe auch [NOTICE](NOTICE).

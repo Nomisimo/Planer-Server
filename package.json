@@ -4,7 +4,7 @@
   "private": true,
   "description": "Gemeinsamer Echtzeit-Server für Netzwerkplaner und Stromplaner: eigene Sitzungen je App, Operationen mit Versionsnummer",
   "type": "module",
-  "license": "UNLICENSED",
+  "license": "Apache-2.0",
   "main": "dist/server.js",
   "scripts": {
     "build": "node scripts/build.js",
