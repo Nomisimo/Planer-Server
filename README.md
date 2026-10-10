@@ -30,11 +30,14 @@ Ohne TLS gedacht für das eigene LAN. Aus dem Internet erreichbar nur hinter ein
 | `GET /api/sessions?app=netzwerkplaner` | Sitzungen einer App |
 | `POST /api/sessions` | `{ app, name, code?, appVersion, doc }` legt eine Sitzung an |
 | `GET /api/sessions/:id/doc` | aktueller Stand (Header `X-Session-Code`) |
-| `DELETE /api/sessions/:id` | Sitzung löschen (Header `X-Session-Code`) |
-| `WS /ws` | Echtzeit-Protokoll, siehe `src/hub.js` |
+| `GET /api/sessions/:id/verlauf` | Verlauf aller Nutzer (Header `X-Session-Code`) |
+| `DELETE /api/sessions/:id` | Sitzung von außen beenden, nur nach `LEER_BEENDBAR_STUNDEN` ohne Teilnehmer (Header `X-Session-Code`) |
+| `WS /ws` | Echtzeit-Protokoll, siehe [docs/STROMPLANER.md](docs/STROMPLANER.md#5-websocket-protokoll) und `src/hub.js` |
 | `GET/PUT/DELETE /api/plans[/:id]` | bisheriger Stromplaner-Sync, unverändert kompatibel |
 
 ## Einbinden in eine App
+
+Die vollständige Anleitung für den Stromplaner-Umbau (Protokoll, Ops-Format, Versionen, Schritte) steht in **[docs/STROMPLANER.md](docs/STROMPLANER.md)**.
 
 `client/sync-client.js` (mit `client/ops.js`) ist für alle Apps gleich:
 
