@@ -24,6 +24,7 @@ export class Store {
       const appDir = path.join(this.dir, app);
       if (!fs.statSync(appDir).isDirectory() || app === "plans") continue;
       for (const id of fs.readdirSync(appDir)) {
+        if (app === "stromplaner" && id === "plans") continue; // Ablage der Stromplaner-Pläne, keine Sitzung
         try { out.push(this.lade(app, id, apply)); }
         catch (e) { console.error(`Sitzung ${app}/${id} nicht lesbar: ${e.message}`); }
       }

@@ -114,11 +114,33 @@ export const starteServer = ({ port = 3001, dataDir = "./data", authToken = "", 
   });
 };
 
+// Prüft, ob der Server in dataDir schreiben darf. Gibt bei fehlenden Rechten eine
+// verständliche Meldung zurück (statt eines Stacktraces mit EACCES), sonst null.
+export const pruefeDatenordner = (dataDir) => {
+  try {
+    fs.mkdirSync(path.join(dataDir, "stromplaner", "plans"), { recursive: true });
+    fs.accessSync(dataDir, fs.constants.W_OK);
+    return null;
+  } catch (e) {
+    if (e.code !== "EACCES" && e.code !== "EPERM" && e.code !== "EROFS") throw e;
+    const uid = typeof process.getuid === "function" ? process.getuid() : "?";
+    const gid = typeof process.getgid === "function" ? process.getgid() : "?";
+    return [
+      `Keine Schreibrechte auf ${path.resolve(dataDir)} (${e.code}${e.path ? ` bei ${e.path}` : ""}).`,
+      `Der Server läuft als UID ${uid}; der Datenordner muss diesem Benutzer gehören.`,
+      e.code === "EROFS" ? "Der Ordner ist schreibgeschützt eingehängt (read-only)." :
+        `Abhilfe auf dem Host, im Projektordner: chown -R ${uid}:${gid} data && docker compose restart`,
+    ].join("\n");
+  }
+};
+
 // Direkt gestartet (node dist/server.js)
 if (process.argv[1] && /server\.(js|mjs|cjs)$/.test(process.argv[1]) && !process.env.PLANER_SERVER_NO_START) {
   const port = +(process.env.PORT || 3001);
   const dataDir = process.env.DATA_DIR || "./data";
   const leer = parseFloat(process.env.LEER_BEENDBAR_STUNDEN);
+  const fehler = pruefeDatenordner(dataDir);
+  if (fehler) { console.error(fehler); process.exit(1); }
   starteServer({ port, dataDir, authToken: process.env.AUTH_TOKEN || "", ...(leer >= 0 ? { leerBeendbarMs: leer * 3600_000 } : {}) }).then(({ stop }) => {
     console.log(`Planer-Server läuft auf Port ${port}, Daten in ${dataDir}${process.env.AUTH_TOKEN ? ", Token aktiv" : ""}`);
     const ende = () => stop().then(() => process.exit(0));

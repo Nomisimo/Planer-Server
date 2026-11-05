@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import WebSocket from "ws";
-import { starteServer } from "../src/server.js";
+import { starteServer, pruefeDatenordner } from "../src/server.js";
 import { vergleicheVersion } from "../src/hub.js";
 import { createSyncClient } from "../client/sync-client.js";
 import { diff } from "../src/ops.js";
@@ -298,4 +298,20 @@ test("Version: neuere App übernimmt eine leere Sitzung, ältere nie", async () 
     await bis(() => N.online && migriert);
     assert.equal((await (await u.req("/api/sessions?app=netzwerkplaner")).json())[0].appVersion, "0.7.0-beta.6");
   } finally { await u.ende(); }
+});
+
+test("Datenordner ohne Schreibrechte ergibt eine verständliche Meldung", { skip: process.getuid?.() === 0 && "läuft als root, Rechte greifen nicht" }, () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "planer-ro-"));
+  try {
+    assert.equal(pruefeDatenordner(path.join(dir, "ok")), null);
+    const gesperrt = path.join(dir, "gesperrt");
+    fs.mkdirSync(gesperrt);
+    fs.chmodSync(gesperrt, 0o555);
+    const meldung = pruefeDatenordner(gesperrt);
+    assert.match(meldung, /Keine Schreibrechte auf .*gesperrt/);
+    assert.match(meldung, /chown -R \d+:\d+ data/);
+  } finally {
+    fs.chmodSync(path.join(dir, "gesperrt"), 0o755);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
