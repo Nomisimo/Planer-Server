@@ -13,6 +13,14 @@ docker compose up -d --build
 
 Der Server lauscht auf Port **3001** (wie der bisherige Stromplaner-Sync-Server), Daten liegen in `./data`.
 
+**Rechte auf `./data`:** Der Container startet kurz als root, setzt den Besitzer von `/data` auf den Benutzer `node` (UID 1000) und startet den Server dann ohne Root-Rechte. Legt Docker `./data` beim ersten Start selbst an (dann gehört der Ordner root), klappt das also ohne Handarbeit. Wo der Container den Besitzer nicht ändern darf (z. B. NFS mit `root_squash`) oder wer den Container mit eigenem `user:` startet, legt den Ordner vorher selbst an:
+
+```bash
+mkdir -p data && sudo chown 1000:1000 data
+```
+
+Fehlen die Rechte trotzdem, beendet sich der Server mit der Meldung „Keine Schreibrechte auf /data …“ und nennt den passenden `chown`-Befehl.
+
 | Variable | Standard | Zweck |
 |---|---|---|
 | `PORT` | 3001 | Port für HTTP und WebSocket |
