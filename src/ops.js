@@ -92,16 +92,23 @@ const insertAfter = (arr, item, afterId, idOf) => {
 
 /* ── Anwenden ─────────────────────────────────────────────────────────── */
 
+// Schlüssel, über die man an Object.prototype käme (Prototype Pollution). Werden nie aufgelöst.
+const VERBOTEN = new Set(["__proto__", "constructor", "prototype"]);
+const verboten = (s) => typeof s === "string" && VERBOTEN.has(s);
+
 // Löst einen Pfad bis zum vorletzten Segment auf. Liefert { parent, key } oder null, wenn der Pfad
 // nicht (mehr) existiert, z. B. weil jemand das Gerät inzwischen gelöscht hat.
 const resolve = (doc, path) => {
+  if (!Array.isArray(path)) return null;
   let cur = doc;
   for (let i = 0; i < path.length - 1; i++) {
     const s = path[i];
+    if (verboten(s)) return null;
     cur = isObj(s) ? (Array.isArray(cur) ? cur.find((x) => hasId(x) && x.id === s.id) : undefined) : cur?.[s];
     if (cur === undefined || cur === null || typeof cur !== "object") return null;
   }
   const key = path[path.length - 1];
+  if (verboten(key)) return null;
   if (isObj(key)) {
     if (!Array.isArray(cur)) return null;
     const i = cur.findIndex((x) => hasId(x) && x.id === key.id);
